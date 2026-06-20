@@ -1,0 +1,20 @@
+name: hdr2 test
+on:
+  workflow_call:
+    inputs:
+      runtime:
+        required: true
+        type: string
+      refresh_cmd:
+        required: true
+        type: string
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  hdr2:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          R: ${{ inputs.refresh_cmd }}
+        run: echo "runtime=${{ inputs.runtime }} refresh=$R"
