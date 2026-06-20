@@ -1,0 +1,33 @@
+name: hdr test
+on:
+  workflow_call:
+    inputs:
+      runtime:
+        required: true
+        type: string
+      node_version:
+        required: false
+        type: string
+        default: "lts/*"
+      refresh_cmd:
+        required: true
+        type: string
+      gate_cmd:
+        required: true
+        type: string
+    secrets:
+      PUSH_PAT:
+        required: false
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  hdr:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          R: ${{ inputs.refresh_cmd }}
+          G: ${{ inputs.gate_cmd }}
+        run: |
+          echo "runtime=${{ inputs.runtime }} node=${{ inputs.node_version }}"
+          echo "refresh=$R gate=$G"
