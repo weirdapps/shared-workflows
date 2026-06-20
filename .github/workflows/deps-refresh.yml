@@ -1,0 +1,93 @@
+name: Reusable Dependency Refresh
+
+# Reusable workflow: refresh a repo's lockfile, validate it, and open a PR.
+# Callers (see weirdapps/* repos' .github/workflows/deps-refresh.yml) set the
+# schedule + pass their stack-specific commands as inputs. Single source of
+# truth for the fleet's monthly dependency-refresh logic.
+#
+# Input names use underscores (hyphens are invalid in ${{ inputs.x }} dot
+# access). Command inputs run via env vars with bash -c "$VAR" — never
+# interpolated directly into a run: block.
+
+on:
+  workflow_call:
+    inputs:
+      runtime:
+        description: "Runtime to set up: 'node' or 'python'"
+        required: true
+        type: string
+      node_version:
+        description: "Node version (when runtime=node)"
+        required: false
+        type: string
+        default: "lts/*"
+      python_version:
+        description: "Python version (when runtime=python)"
+        required: false
+        type: string
+        default: "3.12"
+      setup_cmd:
+        description: "Optional extra setup before refresh (e.g. install poetry/uv/pip-tools)"
+        required: false
+        type: string
+        default: ""
+      refresh_cmd:
+        description: "Command that refreshes the lockfile"
+        required: true
+        type: string
+      gate_cmd:
+        description: "Validation command (tests/build) that must pass before a PR is opened"
+        required: true
+        type: string
+    secrets:
+      PUSH_PAT:
+        description: "Optional PAT for opening the PR; falls back to GITHUB_TOKEN"
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      # actions/setup-node v6
+      - if: ${{ inputs.runtime == 'node' }}
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: ${{ inputs.node_version }}
+      # actions/setup-python v6
+      - if: ${{ inputs.runtime == 'python' }}
+        uses: actions/setup-python@a309ff8be4eef7d722b58cb32a83446b67f7a31a
+        with:
+          python-version: ${{ inputs.python_version }}
+      - if: ${{ inputs.setup_cmd != '' }}
+        name: Extra setup
+        env:
+          SETUP_CMD: ${{ inputs.setup_cmd }}
+        run: bash -euo pipefail -c "$SETUP_CMD"
+      - name: Refresh lockfile
+        env:
+          REFRESH_CMD: ${{ inputs.refresh_cmd }}
+        run: bash -euo pipefail -c "$REFRESH_CMD"
+      - name: Validate
+        env:
+          GATE_CMD: ${{ inputs.gate_cmd }}
+        run: bash -euo pipefail -c "$GATE_CMD"
+      # peter-evans/create-pull-request v8.1.1
+      - name: Open PR with refreshed lockfile
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1
+        with:
+          token: ${{ secrets.PUSH_PAT || github.token }}
+          branch: deps/monthly-refresh
+          delete-branch: true
+          commit-message: "deps: monthly dependency refresh"
+          title: "deps: monthly dependency refresh"
+          body: |
+            Automated monthly dependency refresh (via the shared reusable
+            workflow in `weirdapps/.github`). Validation passed on this branch.
+            Review and merge if green.
+          labels: dependencies
