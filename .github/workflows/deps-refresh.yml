@@ -1,42 +1,32 @@
 name: Reusable Dependency Refresh
 
-# Reusable workflow: refresh a repo's lockfile, validate it, and open a PR.
-# Callers (see weirdapps/* repos' .github/workflows/deps-refresh.yml) set the
-# schedule + pass their stack-specific commands as inputs. Single source of
-# truth for the fleet's monthly dependency-refresh logic.
-#
-# Input names use underscores (hyphens are invalid in ${{ inputs.x }} dot
-# access). Command inputs run via env vars with bash -c "$VAR" — never
-# interpolated directly into a run: block.
+# Reusable npm dependency-refresh: npm update -> validate (gate_cmd) -> open a
+# PR. Callers set their schedule + gate command and MUST declare write
+# permissions (a reusable can't escalate beyond the caller's grant).
+# Command inputs run via env vars (bash -c "$VAR"), never interpolated into run.
 
 on:
   workflow_call:
     inputs:
-      runtime:
-        description: "Runtime to set up: 'node' or 'python'"
-        required: true
-        type: string
       node_version:
-        description: "Node version (when runtime=node)"
+        description: "Node version"
         required: false
         type: string
         default: "lts/*"
-      python_version:
-        description: "Python version (when runtime=python)"
-        required: false
-        type: string
-        default: "3.12"
       setup_cmd:
-        description: "Optional extra setup before refresh (e.g. install poetry/uv/pip-tools)"
+        description: "Optional extra setup before refresh"
         required: false
         type: string
         default: ""
       refresh_cmd:
-        description: "Command that refreshes the lockfile"
-        required: true
+        description: "Lockfile refresh command"
+        required: false
         type: string
+        default: |
+          npm update
+          npm install
       gate_cmd:
-        description: "Validation command (tests/build) that must pass before a PR is opened"
+        description: "Validation command that must pass before a PR opens"
         required: true
         type: string
     secrets:
@@ -55,21 +45,15 @@ jobs:
       # actions/checkout v6
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
       # actions/setup-node v6
-      - if: ${{ inputs.runtime == 'node' }}
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: ${{ inputs.node_version }}
-      # actions/setup-python v6
-      - if: ${{ inputs.runtime == 'python' }}
-        uses: actions/setup-python@a309ff8be4eef7d722b58cb32a83446b67f7a31a
-        with:
-          python-version: ${{ inputs.python_version }}
       - if: ${{ inputs.setup_cmd != '' }}
         name: Extra setup
         env:
           SETUP_CMD: ${{ inputs.setup_cmd }}
         run: bash -euo pipefail -c "$SETUP_CMD"
-      - name: Refresh lockfile
+      - name: Refresh dependencies
         env:
           REFRESH_CMD: ${{ inputs.refresh_cmd }}
         run: bash -euo pipefail -c "$REFRESH_CMD"
@@ -87,7 +71,7 @@ jobs:
           commit-message: "deps: monthly dependency refresh"
           title: "deps: monthly dependency refresh"
           body: |
-            Automated monthly dependency refresh (via the shared reusable
-            workflow in `weirdapps/.github`). Validation passed on this branch.
+            Automated monthly dependency refresh via the shared reusable
+            workflow (weirdapps/shared-workflows). Validation passed.
             Review and merge if green.
           labels: dependencies
