@@ -147,4 +147,4 @@ When making a breaking change here, switch pinned callers to a SHA on the previo
 
 ## License
 
-No `LICENSE` file is present. Treat the contents as all rights reserved by the author (Dimitrios Plessas) until a license is added.
+MIT, see [LICENSE](LICENSE). Copyright (c) 2026 Dimitrios Plessas.
