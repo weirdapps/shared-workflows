@@ -104,7 +104,7 @@ When `gate_cmd` fails, the job fails and no PR is opened.
 ## Flow
 
 ```mermaid
-flowchart LR
+flowchart TD
   A[Caller repo: schedule or workflow_dispatch] --> B[shared-workflows/deps-refresh.yml]
   B --> C[actions/checkout v6]
   C --> D[actions/setup-node v6]
