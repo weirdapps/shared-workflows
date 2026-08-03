@@ -122,7 +122,8 @@ The poll **excludes the caller workflow's own checks**, matched on `.workflow !=
 | Input | Required | Default | Description |
 |---|---|---|---|
 | `allow_minor` | no | `true` | Auto-merge `semver-minor` and `semver-patchminor`. Set `false` for patch-only. |
-| `allow_grouped` | no | `true` | Auto-merge grouped updates. A group can contain a major, so this is an explicit opt-in. |
+| `allow_grouped` | no | `true` | Auto-merge grouped updates. Set `false` to leave every group for manual review. |
+| `allow_major_in_group` | no | `true` | Auto-merge a group whose aggregate level is `semver-major`. Set `false` for the stricter "a major is never auto-merged, not even inside a group" policy while still auto-merging safe groups. Only consulted when `allow_grouped` is true. |
 | `exclude_branch_prefixes` | no | `""` | Whitespace-separated head-branch prefixes to skip, for example `dependabot/pip/`. Use where Dependabot edits a *derived* lockfile and would desync the real source of truth. |
 | `checks_timeout_minutes` | no | `45` | How long to wait for the caller's checks before failing. |
 | `merge_method` | no | `squash` | `squash`, `merge`, or `rebase`. |
@@ -164,6 +165,16 @@ jobs:
     uses: weirdapps/shared-workflows/.github/workflows/dependabot-auto-merge.yml@main
     with:
       exclude_branch_prefixes: "dependabot/pip/"
+```
+
+With the stricter major policy (`outlook-access`, `plessas-marketplace`, `teams-access`), where a major must never land unreviewed even as part of a group:
+
+```yaml
+jobs:
+  auto-merge:
+    uses: weirdapps/shared-workflows/.github/workflows/dependabot-auto-merge.yml@main
+    with:
+      allow_major_in_group: false
 ```
 
 ### Behaviour

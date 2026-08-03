@@ -21,7 +21,9 @@ Output (callers depend on these exact values): branch `deps/monthly-refresh` (re
 
 ## dependabot-auto-merge.yml contract
 
-Inputs: `allow_minor` (default true), `allow_grouped` (default true), `exclude_branch_prefixes` (default empty, whitespace-separated), `checks_timeout_minutes` (default 45), `merge_method` (default `squash`). No secrets, uses the automatic `GITHUB_TOKEN`. Caller must grant `contents: write` and `pull-requests: write`.
+Inputs: `allow_minor` (default true), `allow_grouped` (default true), `allow_major_in_group` (default true), `exclude_branch_prefixes` (default empty, whitespace-separated), `checks_timeout_minutes` (default 45), `merge_method` (default `squash`). No secrets, uses the automatic `GITHUB_TOKEN`. Caller must grant `contents: write` and `pull-requests: write`.
+
+Callers are NOT uniform. Before changing a default, check what each caller relied on: `outlook-access`, `plessas-marketplace`, and `teams-access` run the stricter `allow_major_in_group: false`, and `etorotrade` sets `exclude_branch_prefixes: "dependabot/pip/"`. Flattening those to the defaults is a silent policy regression, not a cleanup.
 
 Two invariants that are easy to break and expensive to debug:
 

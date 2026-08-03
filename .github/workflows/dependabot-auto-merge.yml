@@ -30,7 +30,15 @@ on:
         type: boolean
         default: true
       allow_grouped:
-        description: "Auto-merge grouped updates regardless of semver level"
+        description: "Auto-merge grouped updates"
+        required: false
+        type: boolean
+        default: true
+      allow_major_in_group:
+        description: >-
+          Auto-merge a grouped update whose aggregate level is semver-major.
+          Set false for the stricter policy "a major is never auto-merged, not
+          even inside a group". Only consulted when allow_grouped is true.
         required: false
         type: boolean
         default: true
@@ -78,6 +86,7 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           ALLOW_MINOR: ${{ inputs.allow_minor }}
           ALLOW_GROUPED: ${{ inputs.allow_grouped }}
+          ALLOW_MAJOR_IN_GROUP: ${{ inputs.allow_major_in_group }}
           EXCLUDE_PREFIXES: ${{ inputs.exclude_branch_prefixes }}
         run: |
           set -euo pipefail
@@ -94,15 +103,27 @@ jobs:
 
           merge=false
           case "$UPDATE_TYPE" in
-            version-update:semver-patch)      merge=true ;;
-            version-update:semver-minor)      [ "$ALLOW_MINOR" = "true" ] && merge=true ;;
-            version-update:semver-patchminor) [ "$ALLOW_MINOR" = "true" ] && merge=true ;;
+            version-update:semver-patch)
+              merge=true
+              ;;
+            version-update:semver-minor|version-update:semver-patchminor)
+              if [ "$ALLOW_MINOR" = "true" ]; then merge=true; fi
+              ;;
           esac
 
-          # Grouped updates report no single semver level, so they are gated
-          # separately. A group can contain a major; the caller opts in.
-          if [ "$ALLOW_GROUPED" = "true" ] && [ -n "$DEP_GROUP" ]; then
-            merge=true
+          # A grouped update is gated separately: its aggregate level can be
+          # major, and some repos want "never auto-merge a major, not even in a
+          # group" while still auto-merging safe groups. This block is the sole
+          # decider for grouped PRs, so it can both grant and revoke.
+          if [ -n "$DEP_GROUP" ]; then
+            if [ "$ALLOW_GROUPED" != "true" ]; then
+              merge=false
+            elif [ "$UPDATE_TYPE" = "version-update:semver-major" ] \
+                 && [ "$ALLOW_MAJOR_IN_GROUP" != "true" ]; then
+              merge=false
+            else
+              merge=true
+            fi
           fi
 
           echo "merge=$merge" >>"$GITHUB_OUTPUT"
