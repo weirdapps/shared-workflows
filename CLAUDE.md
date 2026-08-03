@@ -25,7 +25,7 @@ Inputs: `allow_minor` (default true), `allow_grouped` (default true), `allow_maj
 
 Callers are NOT uniform. Before changing a default, check what each caller relied on: `outlook-access`, `plessas-marketplace`, and `teams-access` run the stricter `allow_major_in_group: false`; every other caller takes the defaults. Flattening those three is a silent policy regression, not a cleanup.
 
-No caller currently sets `exclude_branch_prefixes`. In particular `etorotrade` is NOT a caller of this reusable: it still runs its own local `dependabot-auto-merge.yml` built on `gh pr merge --auto --squash` with an inline `dependabot/pip/` guard, so changes here do not reach it. Do not cite it as a consumer.
+`etorotrade` is the one caller that sets `exclude_branch_prefixes`, to `dependabot/pip/`. Its source of truth is `poetry.lock`, but pip-Dependabot rewrites only the derived `requirements-*-lock.txt`, so auto-merging a pip PR desyncs the two. Do not drop that input when editing its caller.
 
 Three invariants that are easy to break and expensive to debug:
 

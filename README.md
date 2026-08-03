@@ -157,7 +157,7 @@ jobs:
     uses: weirdapps/shared-workflows/.github/workflows/dependabot-auto-merge.yml@main
 ```
 
-With a repo-specific exclusion. Use this where Dependabot edits a *derived* lockfile, for example a Poetry repo in which `poetry.lock` is the source of truth but pip-Dependabot only rewrites the generated `requirements-*-lock.txt`. No current caller sets this input: `etorotrade` has exactly that problem but has not been migrated to this reusable and still runs its own local auto-merge workflow with an inline `startsWith` guard.
+With a repo-specific exclusion. Use this where Dependabot edits a *derived* lockfile, for example a Poetry repo in which `poetry.lock` is the source of truth but pip-Dependabot only rewrites the generated `requirements-*-lock.txt`. `etorotrade` is the caller that uses it, with `dependabot/pip/`.
 
 ```yaml
 jobs:
