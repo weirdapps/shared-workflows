@@ -9,6 +9,7 @@ There is no application code, no local runtime, and no self-CI in this repo. The
 | Workflow | Purpose |
 |---|---|
 | `.github/workflows/deps-refresh.yml` | Node/npm dependency refresh: refresh the lockfile, run a caller-supplied gate command, open a PR when the gate passes. |
+| `.github/workflows/dependabot-auto-merge.yml` | Classify a Dependabot PR, wait for the caller's checks, squash-merge safe updates. Majors stay open. |
 
 ## deps-refresh.yml contract
 
@@ -17,6 +18,17 @@ Inputs: `node_version` (default `lts/*`), `setup_cmd` (optional, step skipped wh
 Secret: `PUSH_PAT` (optional, falls back to `github.token`). Use a PAT when you want a bot-authored PR, or when the PR must trigger other workflows (PRs opened by `github.token` do not trigger downstream workflows).
 
 Output (callers depend on these exact values): branch `deps/monthly-refresh` (recreated each run), commit and PR title `deps: monthly dependency refresh`, label `dependencies`. Changing the branch name, title, or label is a breaking change for every caller's merge tooling; treat them as a stable contract.
+
+## dependabot-auto-merge.yml contract
+
+Inputs: `allow_minor` (default true), `allow_grouped` (default true), `exclude_branch_prefixes` (default empty, whitespace-separated), `checks_timeout_minutes` (default 45), `merge_method` (default `squash`). No secrets, uses the automatic `GITHUB_TOKEN`. Caller must grant `contents: write` and `pull-requests: write`.
+
+Two invariants that are easy to break and expensive to debug:
+
+1. **Do not switch this back to a bare `gh pr merge --auto`.** Native auto-merge needs `allow_auto_merge` AND a branch-protection rule. On this plan, private repos cannot have branch protection (`403 Upgrade to GitHub Pro`) and `PATCH allow_auto_merge=true` silently no-ops on them, returning `200` with the value still `false`. `--auto` is attempted first as a fast path, but the polling fallback is what actually merges on most repos here.
+2. **The check poll must keep excluding `.workflow != github.workflow`.** This job is itself a check on the PR it is merging. Waiting on "all checks" waits on itself and hangs until the job timeout.
+
+Majors are deliberately never auto-merged. That is policy, not an oversight: they get manual review.
 
 ## Key conventions (MUST follow when editing)
 

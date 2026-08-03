@@ -1,0 +1,184 @@
+name: Reusable Dependabot Auto-merge
+
+# Reusable Dependabot auto-merge: classify the update -> wait for the caller's
+# own checks -> squash-merge. Callers MUST declare write permissions (a reusable
+# cannot escalate beyond the caller's grant).
+#
+# Why this does not just call `gh pr merge --auto`:
+# GitHub's native auto-merge requires BOTH `allow_auto_merge` on the repo AND a
+# branch-protection rule to gate on. Neither is available here: branch protection
+# on a private repo is a paid feature on this plan, and PATCHing
+# `allow_auto_merge=true` on a private repo silently no-ops. So `--auto` fails with
+# "Auto merge is not allowed for this repository" (allow_auto_merge off) or
+# "Protected branch rules not configured for this branch" (no protection rule),
+# and every patch/minor Dependabot PR silently piles up forever.
+#
+# This workflow therefore tries `--auto` first (correct and cheapest where it does
+# work, i.e. a public repo with protection configured) and otherwise falls back to
+# polling the PR's checks itself and merging once they are green. The poll excludes
+# the caller workflow's OWN checks, which would otherwise deadlock: this job is
+# itself a check on the same PR, so waiting for "all checks" would wait for itself.
+#
+# Command inputs run via env vars (bash -c "$VAR"), never interpolated into run.
+
+on:
+  workflow_call:
+    inputs:
+      allow_minor:
+        description: "Auto-merge semver-minor updates"
+        required: false
+        type: boolean
+        default: true
+      allow_grouped:
+        description: "Auto-merge grouped updates regardless of semver level"
+        required: false
+        type: boolean
+        default: true
+      exclude_branch_prefixes:
+        description: >-
+          Whitespace-separated head-branch prefixes to skip, e.g.
+          "dependabot/pip/". Use for ecosystems whose Dependabot PRs edit a
+          DERIVED lockfile and would desync the real source of truth.
+        required: false
+        type: string
+        default: ""
+      checks_timeout_minutes:
+        description: "How long to wait for the caller's checks before giving up"
+        required: false
+        type: number
+        default: 45
+      merge_method:
+        description: "squash | merge | rebase"
+        required: false
+        type: string
+        default: "squash"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    timeout-minutes: 60
+    steps:
+      # dependabot/fetch-metadata v3.1.0
+      - name: Get Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Classify update
+        id: decide
+        env:
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          DEP_GROUP: ${{ steps.meta.outputs.dependency-group }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          ALLOW_MINOR: ${{ inputs.allow_minor }}
+          ALLOW_GROUPED: ${{ inputs.allow_grouped }}
+          EXCLUDE_PREFIXES: ${{ inputs.exclude_branch_prefixes }}
+        run: |
+          set -euo pipefail
+
+          for prefix in $EXCLUDE_PREFIXES; do
+            case "$HEAD_REF" in
+              "$prefix"*)
+                echo "merge=false" >>"$GITHUB_OUTPUT"
+                echo "Skipping: head ref '$HEAD_REF' matches excluded prefix '$prefix'."
+                exit 0
+                ;;
+            esac
+          done
+
+          merge=false
+          case "$UPDATE_TYPE" in
+            version-update:semver-patch)      merge=true ;;
+            version-update:semver-minor)      [ "$ALLOW_MINOR" = "true" ] && merge=true ;;
+            version-update:semver-patchminor) [ "$ALLOW_MINOR" = "true" ] && merge=true ;;
+          esac
+
+          # Grouped updates report no single semver level, so they are gated
+          # separately. A group can contain a major; the caller opts in.
+          if [ "$ALLOW_GROUPED" = "true" ] && [ -n "$DEP_GROUP" ]; then
+            merge=true
+          fi
+
+          echo "merge=$merge" >>"$GITHUB_OUTPUT"
+          echo "update-type='$UPDATE_TYPE' group='$DEP_GROUP' ref='$HEAD_REF' -> merge=$merge"
+          if [ "$merge" != "true" ]; then
+            echo "Major or excluded update. Leaving open for manual review." >>"$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Merge when green
+        if: steps.decide.outputs.merge == 'true'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SELF_WORKFLOW: ${{ github.workflow }}
+          TIMEOUT_MINUTES: ${{ inputs.checks_timeout_minutes }}
+          MERGE_METHOD: ${{ inputs.merge_method }}
+        run: |
+          set -euo pipefail
+
+          state=$(gh pr view "$PR_URL" --json state --jq .state)
+          if [ "$state" != "OPEN" ]; then
+            echo "PR is $state already, nothing to do."
+            exit 0
+          fi
+
+          # Fast path: native auto-merge. Works only where allow_auto_merge is on
+          # AND a branch-protection rule exists. Failure here is expected and fine.
+          if gh pr merge "$PR_URL" --auto "--$MERGE_METHOD" 2>/dev/null; then
+            echo "Queued via native auto-merge."
+            exit 0
+          fi
+          echo "Native auto-merge unavailable, polling checks instead."
+
+          # Exclude this workflow's own checks or we would wait on ourselves.
+          deadline=$(( SECONDS + TIMEOUT_MINUTES * 60 ))
+          while :; do
+            raw=$(gh pr checks "$PR_URL" --json name,bucket,workflow 2>/dev/null || echo '[]')
+            [ -n "$raw" ] || raw='[]'
+            others=$(printf '%s' "$raw" | jq -c --arg self "$SELF_WORKFLOW" \
+              '[.[] | select(.workflow != $self)]')
+
+            failed=$(printf '%s' "$others" | jq '[.[] | select(.bucket == "fail")] | length')
+            pending=$(printf '%s' "$others" | jq '[.[] | select(.bucket == "pending")] | length')
+            total=$(printf '%s' "$others" | jq 'length')
+
+            if [ "$failed" -gt 0 ]; then
+              printf '%s' "$others" | jq -r \
+                '.[] | select(.bucket == "fail") | "  FAILED: \(.workflow) / \(.name)"'
+              echo "::error::$failed check(s) failed on this PR. Not merging."
+              exit 1
+            fi
+
+            if [ "$pending" -eq 0 ]; then
+              echo "All $total non-self check(s) green."
+              break
+            fi
+
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::Timed out after ${TIMEOUT_MINUTES}m with $pending check(s) still pending."
+              exit 1
+            fi
+            echo "  $pending pending, $total total. Waiting."
+            sleep 20
+          done
+
+          # A merge can still lose a race if another PR landed first. Dependabot
+          # rebases on request, which re-triggers this workflow, so bail cleanly.
+          for attempt in 1 2 3; do
+            if gh pr merge "$PR_URL" "--$MERGE_METHOD" --delete-branch; then
+              echo "Merged on attempt $attempt."
+              exit 0
+            fi
+            echo "Merge attempt $attempt failed, retrying."
+            sleep 15
+          done
+
+          echo "Merge failed 3 times, most likely the base branch moved."
+          gh pr comment "$PR_URL" --body "@dependabot rebase"
+          echo "Requested a Dependabot rebase; this workflow will re-run after it lands."

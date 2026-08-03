@@ -2,15 +2,16 @@
 
 Reusable GitHub Actions workflows for the `weirdapps` org.
 
-The repo is public so any weirdapps repo (public or private) can call the workflows via `uses:`. It currently ships one reusable workflow, `deps-refresh.yml`, which refreshes an npm lockfile, runs a caller-supplied gate command, and opens a pull request when the gate passes.
+The repo is public so any weirdapps repo (public or private) can call the workflows via `uses:`.
 
-There is no CI in this repo itself; the workflow is exercised by its callers.
+There is no CI in this repo itself; the workflows are exercised by their callers.
 
 ## Contents
 
 | Workflow | Purpose |
 |---|---|
 | [`.github/workflows/deps-refresh.yml`](.github/workflows/deps-refresh.yml) | Node/npm dependency refresh: refresh the lockfile, run a validation command, open a PR with the changes. |
+| [`.github/workflows/dependabot-auto-merge.yml`](.github/workflows/dependabot-auto-merge.yml) | Classify a Dependabot PR, wait for the caller's checks, squash-merge safe updates. Works without branch protection. |
 
 ## `deps-refresh.yml`
 
@@ -100,6 +101,79 @@ When `gate_cmd` passes, one PR is opened per run:
 - Body: a short note that the refresh was produced by this shared reusable and that validation passed.
 
 When `gate_cmd` fails, the job fails and no PR is opened.
+
+## `dependabot-auto-merge.yml`
+
+Classifies a Dependabot PR, waits for the caller's own checks, and squash-merges the safe ones. Major bumps are left open for manual review.
+
+### Why this exists
+
+GitHub's native auto-merge (`gh pr merge --auto`) requires **both** `allow_auto_merge` on the repository **and** a branch-protection rule to gate on. Neither is reliably available in this org:
+
+- Branch protection on a **private** repo is a paid feature on the current plan, so `GET /repos/{r}/branches/{b}/protection` returns `403 Upgrade to GitHub Pro`.
+- `PATCH /repos/{r} allow_auto_merge=true` **silently no-ops** on a private repo. It returns `200` with `allow_auto_merge: false`.
+
+So `--auto` fails with either `Auto merge is not allowed for this repository` or `Protected branch rules not configured for this branch`, the job exits non-zero, and every patch and minor Dependabot PR piles up indefinitely. This workflow tries `--auto` first (cheapest and correct where it does work) and otherwise polls the PR's checks itself and merges once they are green.
+
+The poll **excludes the caller workflow's own checks**, matched on `.workflow != github.workflow`. This job is itself a check on the same PR, so waiting for "all checks" would wait for itself and deadlock until the job timeout.
+
+### Inputs
+
+| Input | Required | Default | Description |
+|---|---|---|---|
+| `allow_minor` | no | `true` | Auto-merge `semver-minor` and `semver-patchminor`. Set `false` for patch-only. |
+| `allow_grouped` | no | `true` | Auto-merge grouped updates. A group can contain a major, so this is an explicit opt-in. |
+| `exclude_branch_prefixes` | no | `""` | Whitespace-separated head-branch prefixes to skip, for example `dependabot/pip/`. Use where Dependabot edits a *derived* lockfile and would desync the real source of truth. |
+| `checks_timeout_minutes` | no | `45` | How long to wait for the caller's checks before failing. |
+| `merge_method` | no | `squash` | `squash`, `merge`, or `rebase`. |
+
+### Secrets
+
+None. Uses the automatic `GITHUB_TOKEN`.
+
+### Required caller permissions
+
+The caller job must grant at least what the reusable declares, because a reusable workflow cannot escalate:
+
+```yaml
+permissions:
+  contents: write
+  pull-requests: write
+```
+
+### Caller example
+
+```yaml
+name: Dependabot auto-merge
+'on': pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    uses: weirdapps/shared-workflows/.github/workflows/dependabot-auto-merge.yml@main
+```
+
+With a repo-specific exclusion (this is the `etorotrade` case, where `poetry.lock` is the source of truth and pip-Dependabot edits only the derived `requirements-*-lock.txt`):
+
+```yaml
+jobs:
+  auto-merge:
+    uses: weirdapps/shared-workflows/.github/workflows/dependabot-auto-merge.yml@main
+    with:
+      exclude_branch_prefixes: "dependabot/pip/"
+```
+
+### Behaviour
+
+- Not a Dependabot PR: the job is skipped by its `if:` guard.
+- Major bump, or an excluded branch prefix: classified `merge=false`, a note is written to the step summary, PR stays open.
+- Any non-self check fails: the failing `workflow / job` names are printed and the job exits non-zero. Nothing is merged.
+- Checks still pending past `checks_timeout_minutes`: the job fails rather than merging blind.
+- Caller has no CI at all: only the self-check exists, so the poll sees zero other checks and merges immediately.
+- Merge loses a race to another PR: retried three times, then the workflow comments `@dependabot rebase` and exits cleanly. Dependabot's rebase re-triggers the workflow.
 
 ## Flow
 
