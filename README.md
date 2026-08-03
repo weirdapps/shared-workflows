@@ -93,9 +93,9 @@ Stagger the cron across repos so the shared runner minutes are not all consumed 
 
 ### Output
 
-When `gate_cmd` passes, one PR is opened per run:
+When `gate_cmd` passes, the run opens a PR, or updates the one still open from a previous run:
 
-- Branch: `deps/monthly-refresh` (recreated each run via `delete-branch: true`).
+- Branch: `deps/monthly-refresh`. Reused and force-updated while a PR is open, so consecutive runs update that single PR rather than opening a second. `delete-branch: true` removes the branch once no active PR references it, that is, after the PR merges or closes.
 - Commit and PR title: `deps: monthly dependency refresh`.
 - Label: `dependencies`.
 - Body: a short note that the refresh was produced by this shared reusable and that validation passed.
@@ -104,7 +104,7 @@ When `gate_cmd` fails, the job fails and no PR is opened.
 
 ## `dependabot-auto-merge.yml`
 
-Classifies a Dependabot PR, waits for the caller's own checks, and squash-merges the safe ones. Major bumps are left open for manual review.
+Classifies a Dependabot PR, waits for the caller's own checks, and squash-merges the safe ones. An ungrouped major is always left open for manual review. A grouped update is merged under the defaults even when its aggregate level is major, unless the caller sets `allow_major_in_group: false`.
 
 ### Why this exists
 
@@ -121,11 +121,11 @@ The poll **excludes the caller workflow's own checks**, matched on `.workflow !=
 
 | Input | Required | Default | Description |
 |---|---|---|---|
-| `allow_minor` | no | `true` | Auto-merge `semver-minor` and `semver-patchminor`. Set `false` for patch-only. |
+| `allow_minor` | no | `true` | Auto-merge `semver-minor` and `semver-patchminor`. Set `false` for patch-only. Applies to ungrouped PRs only: a grouped PR is decided entirely by `allow_grouped` and `allow_major_in_group`, which override this. |
 | `allow_grouped` | no | `true` | Auto-merge grouped updates. Set `false` to leave every group for manual review. |
 | `allow_major_in_group` | no | `true` | Auto-merge a group whose aggregate level is `semver-major`. Set `false` for the stricter "a major is never auto-merged, not even inside a group" policy while still auto-merging safe groups. Only consulted when `allow_grouped` is true. |
 | `exclude_branch_prefixes` | no | `""` | Whitespace-separated head-branch prefixes to skip, for example `dependabot/pip/`. Use where Dependabot edits a *derived* lockfile and would desync the real source of truth. |
-| `checks_timeout_minutes` | no | `45` | How long to wait for the caller's checks before failing. |
+| `checks_timeout_minutes` | no | `45` | How long to wait for the caller's checks before failing. The job's own `timeout-minutes` is 60 and is not caller-overridable, so a value at or above 60 is cut short by the job timeout instead. |
 | `merge_method` | no | `squash` | `squash`, `merge`, or `rebase`. |
 
 ### Secrets
@@ -157,7 +157,7 @@ jobs:
     uses: weirdapps/shared-workflows/.github/workflows/dependabot-auto-merge.yml@main
 ```
 
-With a repo-specific exclusion (this is the `etorotrade` case, where `poetry.lock` is the source of truth and pip-Dependabot edits only the derived `requirements-*-lock.txt`):
+With a repo-specific exclusion. Use this where Dependabot edits a *derived* lockfile, for example a Poetry repo in which `poetry.lock` is the source of truth but pip-Dependabot only rewrites the generated `requirements-*-lock.txt`. No current caller sets this input: `etorotrade` has exactly that problem but has not been migrated to this reusable and still runs its own local auto-merge workflow with an inline `startsWith` guard.
 
 ```yaml
 jobs:
@@ -180,13 +180,14 @@ jobs:
 ### Behaviour
 
 - Not a Dependabot PR: the job is skipped by its `if:` guard.
-- Major bump, or an excluded branch prefix: classified `merge=false`, a note is written to the step summary, PR stays open.
+- Ungrouped major bump, or an excluded branch prefix: classified `merge=false`, a note is written to the step summary, PR stays open.
+- Grouped update: the grouped inputs are the sole decider and overwrite the update-type verdict, so `allow_minor` is ignored here. Under the defaults the group merges even when its aggregate level is major; set `allow_major_in_group: false` to hold those.
 - Any non-self check fails: the failing `workflow / job` names are printed and the job exits non-zero. Nothing is merged.
 - Checks still pending past `checks_timeout_minutes`: the job fails rather than merging blind.
 - Caller has no CI at all: only the self-check exists, so the poll sees zero other checks and merges immediately.
 - Merge loses a race to another PR: retried three times, then the workflow comments `@dependabot rebase` and exits cleanly. Dependabot's rebase re-triggers the workflow.
 
-## Flow
+## `deps-refresh.yml` flow
 
 ```mermaid
 flowchart TD
@@ -226,7 +227,10 @@ When making a breaking change here, switch pinned callers to a SHA on the previo
 .
 ├── .github/
 │   └── workflows/
+│       ├── dependabot-auto-merge.yml
 │       └── deps-refresh.yml
+├── CLAUDE.md
+├── LICENSE
 └── README.md
 ```
 
