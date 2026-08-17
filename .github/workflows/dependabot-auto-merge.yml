@@ -146,7 +146,25 @@ jobs:
         run: |
           set -euo pipefail
 
-          state=$(gh pr view "$PR_URL" --json state --jq .state)
+          # Any single gh call can 503 during a GitHub incident. Under
+          # `set -e` that kills the step, which is safe (nothing merges) but
+          # turns a transient blip into a red check that no longer retries.
+          # Retry the calls whose failure would otherwise end the job.
+          gh_retry() {
+            local n=0 out
+            until out=$("$@" 2>&1); do
+              n=$((n + 1))
+              if [ "$n" -ge "$MAX_API_FAILURES" ]; then
+                echo "::error::\`$*\` failed $MAX_API_FAILURES times. Last output: $out" >&2
+                return 1
+              fi
+              echo "  gh call failed ($n/$MAX_API_FAILURES), retrying: $out" >&2
+              sleep $((n * 10))
+            done
+            printf '%s' "$out"
+          }
+
+          state=$(gh_retry gh pr view "$PR_URL" --json state --jq .state)
           if [ "$state" != "OPEN" ]; then
             echo "PR is $state already, nothing to do."
             exit 0
