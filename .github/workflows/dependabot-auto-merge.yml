@@ -140,6 +140,9 @@ jobs:
           SELF_WORKFLOW: ${{ github.workflow }}
           TIMEOUT_MINUTES: ${{ inputs.checks_timeout_minutes }}
           MERGE_METHOD: ${{ inputs.merge_method }}
+          GH_REPO: ${{ github.repository }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          MAX_API_FAILURES: "5"
         run: |
           set -euo pipefail
 
@@ -149,19 +152,56 @@ jobs:
             exit 0
           fi
 
-          # Fast path: native auto-merge. Works only where allow_auto_merge is on
-          # AND a branch-protection rule exists. Failure here is expected and fine.
-          if gh pr merge "$PR_URL" --auto "--$MERGE_METHOD" 2>/dev/null; then
-            echo "Queued via native auto-merge."
-            exit 0
+          # Fast path: native auto-merge, but ONLY when the base branch actually
+          # declares required status checks.
+          #
+          # The header's claim that --auto "requires a branch-protection rule" is
+          # true of the API call, not of the outcome. On a repo with
+          # allow_auto_merge=true and NO required checks, --auto is accepted and
+          # merges IMMEDIATELY, which silently bypasses this entire job. That is
+          # not theoretical: resume PR #147 was queued at 14:26:59 and landed at
+          # 14:26:57, 43 seconds before its own CodeQL run went red, leaving a
+          # broken codeql-action version split on the default branch.
+          #
+          # So gate the fast path on the thing that actually makes it safe.
+          if gh api "repos/$GH_REPO/branches/$BASE_REF/protection/required_status_checks" \
+               >/dev/null 2>&1; then
+            if gh pr merge "$PR_URL" --auto "--$MERGE_METHOD" 2>/dev/null; then
+              echo "Queued via native auto-merge ($BASE_REF has required status checks)."
+              exit 0
+            fi
+            echo "Native auto-merge refused despite required checks, polling instead."
+          else
+            echo "No required status checks on $BASE_REF, so --auto would merge on the spot. Polling instead."
           fi
-          echo "Native auto-merge unavailable, polling checks instead."
 
           # Exclude this workflow's own checks or we would wait on ourselves.
           deadline=$(( SECONDS + TIMEOUT_MINUTES * 60 ))
+          api_failures=0
           while :; do
-            raw=$(gh pr checks "$PR_URL" --json name,bucket,workflow 2>/dev/null || echo '[]')
-            [ -n "$raw" ] || raw='[]'
+            # NEVER collapse an unreadable API into "no checks". The previous
+            # `|| echo '[]'` did exactly that: any gh failure produced total=0,
+            # pending=0, and therefore "All 0 non-self check(s) green" -> merge.
+            # During the 2026-08-17 GitHub API outage that would have merged
+            # every open Dependabot PR on an unknown check state.
+            raw=$(gh pr checks "$PR_URL" --json name,bucket,workflow 2>/dev/null) || true
+            if printf '%s' "$raw" | jq -e 'type == "array"' >/dev/null 2>&1; then
+              api_failures=0
+            elif gh pr view "$PR_URL" --json number >/dev/null 2>&1; then
+              # The API is reachable, so this genuinely is "no checks reported".
+              raw='[]'
+              api_failures=0
+            else
+              api_failures=$(( api_failures + 1 ))
+              if [ "$api_failures" -ge "$MAX_API_FAILURES" ]; then
+                echo "::error::Could not read this PR's checks $MAX_API_FAILURES times in a row. Refusing to merge on an unknown check state."
+                exit 1
+              fi
+              echo "  check read failed ($api_failures/$MAX_API_FAILURES), retrying."
+              sleep 20
+              continue
+            fi
+
             others=$(printf '%s' "$raw" | jq -c --arg self "$SELF_WORKFLOW" \
               '[.[] | select(.workflow != $self)]')
 
@@ -177,6 +217,9 @@ jobs:
             fi
 
             if [ "$pending" -eq 0 ]; then
+              if [ "$total" -eq 0 ]; then
+                echo "::warning::This PR has no non-self checks at all. Merging on the update classifier alone, with no independent verification."
+              fi
               echo "All $total non-self check(s) green."
               break
             fi
