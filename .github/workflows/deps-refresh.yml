@@ -31,7 +31,10 @@ on:
         type: string
     secrets:
       PUSH_PAT:
-        description: "Optional PAT for opening the PR; falls back to GITHUB_TOKEN"
+        description: >-
+          PAT for opening the PR. Optional only in the sense that the workflow
+          still runs without it: the resulting PR will not be mergeable. See the
+          warning the refresh job emits.
         required: false
 
 permissions:
@@ -42,6 +45,35 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     steps:
+      # Warn loudly when PUSH_PAT is absent. Without it the PR is opened by
+      # github.token, which has two consequences and neither is visible on the
+      # PR itself:
+      #   * where Actions may open PRs, the PR is authored by github-actions[bot],
+      #     so every pull_request run parks at action_required with no approval.
+      #     statusCheckRollup is empty and the PR sits UNSTABLE forever. It reads
+      #     as "no checks yet", not as "misconfigured".
+      #   * where Actions may NOT open PRs, the create call is rejected outright
+      #     and this job goes red AFTER pushing the branch, leaving a dangling
+      #     deps/monthly-refresh with no PR.
+      # Both were live on 2026-08-17 across four repos. This does not fail the
+      # job, because the lockfile refresh and the gate are still worth running,
+      # but it stops the cause being invisible.
+      - name: Check PR-opening credential
+        env:
+          HAS_PAT: ${{ secrets.PUSH_PAT != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$HAS_PAT" != "true" ]; then
+            echo "::warning::PUSH_PAT is not set. The PR will be opened by github.token, which either parks all of its checks at action_required or is refused outright. Add the PUSH_PAT repo secret."
+            {
+              echo "### PUSH_PAT missing"
+              echo
+              echo "This refresh PR will not be mergeable. Its checks will never run."
+              echo "Fix: \`gh secret set PUSH_PAT -R <owner>/<repo>\`."
+            } >>"$GITHUB_STEP_SUMMARY"
+          else
+            echo "PUSH_PAT present."
+          fi
       # actions/checkout v6
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
       # actions/setup-node v6
