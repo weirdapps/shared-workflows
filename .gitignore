@@ -1,0 +1,8 @@
+# Secrets. This repo holds no application code, but it is public and a stray
+# dotenv file here would be as exposed as anywhere else. A bare `.env` line does
+# not cover `.env.bak-*` or `.env.local`, and the rule belongs in the repo rather
+# than in a machine-local global ignore file, which no clone or runner ever sees.
+.env
+.env.*
+
+.DS_Store
