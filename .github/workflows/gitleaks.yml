@@ -42,6 +42,27 @@ on:
         required: false
         type: string
         default: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+      scan_mode:
+        description: >-
+          "history" scans every commit, which is the default and the only mode
+          that finds a secret committed and later deleted. "worktree" scans the
+          checked-out tree only.
+
+          Use "worktree" ONLY where a history scan is not achievable, and say
+          why in the caller. The one case here is etoro_census: 2.99 GiB pack,
+          1555 commits, and a history scan was killed twice on a 4 vCPU box, at
+          1800s and again at 2400s. Both documented workarounds failed:
+          --max-target-megabytes bounds what gitleaks INSPECTS rather than what
+          git has to DIFF, and --log-opts pathspec excludes are not honoured
+          (gitleaks issue 1153, the scanner warns and scans everything anyway).
+
+          What "worktree" still buys: every push updates HEAD, so a secret that
+          is committed and left in place IS caught. What it misses: a secret
+          added and removed between two scans, and everything already in
+          history. That is a real gap, so it must be a deliberate choice.
+        required: false
+        type: string
+        default: "history"
       config_path:
         description: >-
           Caller's gitleaks config, relative to the repo root. When the file is
@@ -56,7 +77,7 @@ permissions:
 
 jobs:
   gitleaks:
-    name: gitleaks (full history)
+    name: gitleaks (${{ inputs.scan_mode == 'worktree' && 'working tree' || 'full history' }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -65,7 +86,11 @@ jobs:
       # push and leaves every pre-existing secret invisible.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
-          fetch-depth: 0
+          # Depth 0 for a history scan. A depth-1 checkout would silently reduce
+          # it to a scan of the push and leave every pre-existing secret
+          # invisible. In worktree mode depth 1 is all that is read, and pulling
+          # 3 GB to scan the tip would be pure waste.
+          fetch-depth: ${{ inputs.scan_mode == 'worktree' && 1 || 0 }}
 
       - name: Install gitleaks
         env:
@@ -89,9 +114,10 @@ jobs:
           rm -f "$tarball"
           echo "$RUNNER_TEMP/gitleaks-bin" >>"$GITHUB_PATH"
 
-      - name: Scan full history
+      - name: Scan
         env:
           CONFIG_PATH: ${{ inputs.config_path }}
+          SCAN_MODE: ${{ inputs.scan_mode }}
         run: |
           set -euo pipefail
           gitleaks version
@@ -101,8 +127,17 @@ jobs:
           # gitleaks exits 1 on its own errors, so without this a config that
           # fails to parse is indistinguishable from a clean repo with a leak,
           # and a red build gets triaged as the wrong thing.
-          args=(git . --redact --no-banner --exit-code 2
-                --report-format json --report-path "$report")
+          if [ "${SCAN_MODE}" = "worktree" ]; then
+            # `dir` walks the checked-out tree and never opens the object
+            # database, so this finishes in seconds on a repo whose history
+            # cannot be walked at all.
+            echo "::warning::scan_mode=worktree. HEAD is scanned; git HISTORY is NOT. See the scan_mode input for why this caller opted in."
+            args=(dir . --redact --no-banner --exit-code 2
+                  --report-format json --report-path "$report")
+          else
+            args=(git . --redact --no-banner --exit-code 2
+                  --report-format json --report-path "$report")
+          fi
 
           if [ -f "$CONFIG_PATH" ]; then
             args+=(--config "$CONFIG_PATH")
