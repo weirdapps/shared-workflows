@@ -1,0 +1,32 @@
+name: Secret Scan (self)
+
+# This repo calling its own reusable, against its own copy of the canonical
+# .gitleaks.toml.
+#
+# The repo otherwise has no CI on purpose: the workflows here are exercised by
+# their callers. This one is the exception, and it earns it twice. It is the only
+# thing that proves the reusable still runs end to end after an edit, without
+# waiting for a caller to notice, and it is the only thing that proves the
+# canonical .gitleaks.toml still PARSES before 30 repos copy a broken one. A
+# config that fails to load exits 1, which the reusable reports as a scanner
+# error rather than as a finding, so the two failure modes stay distinguishable.
+
+'on':
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # 04:03 UTC Mondays, ahead of the callers that copy from here.
+    - cron: "3 4 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitleaks-self-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gitleaks:
+    uses: weirdapps/shared-workflows/.github/workflows/gitleaks.yml@main

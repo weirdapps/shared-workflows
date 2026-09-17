@@ -4,7 +4,11 @@ Reusable GitHub Actions workflows for the `weirdapps` org.
 
 The repo is public so any weirdapps repo (public or private) can call the workflows via `uses:`.
 
-There is no CI in this repo itself; the workflows are exercised by their callers.
+There is no CI in this repo itself, with one exception: `gitleaks-self.yml` calls
+this repo's own `gitleaks.yml` against its own copy of the canonical
+`.gitleaks.toml`. That is the only thing proving the reusable still runs end to
+end, and that the template still parses, before 30 repos copy a broken one.
+Everything else here is exercised by its callers.
 
 ## Contents
 

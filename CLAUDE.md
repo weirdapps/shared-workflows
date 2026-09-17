@@ -2,7 +2,7 @@
 
 Reusable GitHub Actions workflows for the `weirdapps` org. The repo is public, so any weirdapps repo (public or private) can call a workflow with `uses: weirdapps/shared-workflows/.github/workflows/<name>.yml@main`.
 
-There is no application code, no local runtime, and no self-CI in this repo. The workflows are exercised only by their callers. "Testing" a change means pointing a caller at your branch or commit SHA and watching that caller's Actions run.
+There is no application code and no local runtime in this repo. Self-CI is limited to `gitleaks-self.yml`, which calls this repo's own `gitleaks.yml` against its own copy of the canonical `.gitleaks.toml`: it is the only check that the reusable still runs end to end and that the template still parses before 30 repos copy a broken one. Every other workflow here is exercised only by its callers. "Testing" a change means pointing a caller at your branch or commit SHA and watching that caller's Actions run.
 
 ## Contents
 
