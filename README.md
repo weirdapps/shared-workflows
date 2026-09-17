@@ -17,6 +17,7 @@ Everything else here is exercised by its callers.
 | [`.github/workflows/deps-refresh.yml`](.github/workflows/deps-refresh.yml) | Node/npm dependency refresh: refresh the lockfile, run a validation command, open a PR with the changes. |
 | [`.github/workflows/dependabot-auto-merge.yml`](.github/workflows/dependabot-auto-merge.yml) | Classify a Dependabot PR, wait for the caller's checks, squash-merge safe updates. Works without branch protection. |
 | [`.github/workflows/gitleaks.yml`](.github/workflows/gitleaks.yml) | Full-history secret scan. Fails the build on any finding. The only server-side net the private repos have. |
+| [`.github/workflows/gitleaks-self.yml`](.github/workflows/gitleaks-self.yml) | Not reusable. This repo calling its own `gitleaks.yml`, so the template cannot rot unnoticed. |
 
 This repo also carries the canonical [`.gitleaks.toml`](.gitleaks.toml), which every
 other repo copies. gitleaks cannot extend a config over the network, so "shared"
@@ -354,6 +355,7 @@ When making a breaking change here, switch pinned callers to a SHA on the previo
 │   └── workflows/
 │       ├── dependabot-auto-merge.yml
 │       ├── deps-refresh.yml
+│       ├── gitleaks-self.yml
 │       └── gitleaks.yml
 ├── .gitleaks.toml        # canonical template, copied into every other repo
 ├── CLAUDE.md

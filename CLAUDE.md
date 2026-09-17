@@ -11,6 +11,7 @@ There is no application code and no local runtime in this repo. Self-CI is limit
 | `.github/workflows/deps-refresh.yml` | Node/npm dependency refresh: refresh the lockfile, run a caller-supplied gate command, open a PR when the gate passes. |
 | `.github/workflows/dependabot-auto-merge.yml` | Classify a Dependabot PR, wait for the caller's checks, squash-merge safe updates. Ungrouped majors stay open; grouped majors merge unless the caller sets `allow_major_in_group: false`. |
 | `.github/workflows/gitleaks.yml` | Full-history secret scan honouring the caller's `.gitleaks.toml` and `.gitleaksignore`. Fails the build on any finding. |
+| `.github/workflows/gitleaks-self.yml` | Not reusable. This repo calling its own `gitleaks.yml` against its own `.gitleaks.toml`. |
 
 This repo also holds the canonical `.gitleaks.toml` that every other repo copies.
 
