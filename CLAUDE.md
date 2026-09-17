@@ -10,6 +10,9 @@ There is no application code, no local runtime, and no self-CI in this repo. The
 |---|---|
 | `.github/workflows/deps-refresh.yml` | Node/npm dependency refresh: refresh the lockfile, run a caller-supplied gate command, open a PR when the gate passes. |
 | `.github/workflows/dependabot-auto-merge.yml` | Classify a Dependabot PR, wait for the caller's checks, squash-merge safe updates. Ungrouped majors stay open; grouped majors merge unless the caller sets `allow_major_in_group: false`. |
+| `.github/workflows/gitleaks.yml` | Full-history secret scan honouring the caller's `.gitleaks.toml` and `.gitleaksignore`. Fails the build on any finding. |
+
+This repo also holds the canonical `.gitleaks.toml` that every other repo copies.
 
 ## deps-refresh.yml contract
 
@@ -34,6 +37,29 @@ Three invariants that are easy to break and expensive to debug:
 3. **The grouped block is the sole decider for grouped PRs and can both grant and revoke.** It runs after the `case` on update type and overwrites that verdict, so `allow_minor: false` does NOT yield patch-only behaviour on a grouped PR. Verified by running the classify script: update-type `semver-minor` with a non-empty group and `allow_minor: false` still classifies `merge=true`.
 
 Majors are handled two different ways, and that is deliberate. An ungrouped major is never auto-merged. A grouped update whose aggregate level is major IS auto-merged under the defaults, because `allow_major_in_group` defaults to true; only the three repos listed above opt out. Do not "fix" the classify block to hold every major: that silently changes behaviour for every caller on the defaults.
+
+## gitleaks.yml contract
+
+Inputs: `gitleaks_version` (default `8.30.1`), `gitleaks_sha256` (default = digest of that version), `config_path` (default `.gitleaks.toml`). No secrets. Caller grants `contents: read`.
+
+Four things here are load-bearing and each one fails silently if removed:
+
+1. **`fetch-depth: 0`.** A depth-1 checkout gives gitleaks one commit, which turns a full-history scan into a scan of the push with no error and no visible difference. Pre-existing secrets, the entire reason this exists, become invisible.
+2. **It calls the gitleaks binary, NOT `gitleaks/gitleaks-action`.** The action scopes its scan by event: `push` and `pull_request` get a `--log-opts` range, only `workflow_dispatch` and `schedule` see full history. Switching to the action silently reintroduces the gap on the two events that run most. The action also defaults to gitleaks 8.24.3, which parses `[[rules]]` but ignores top-level `[[allowlists]]`; that cost etorotrade nine days of red nightly runs in September 2026.
+3. **`--exit-code 2`.** gitleaks exits 1 on its own errors. Without the override, a config that fails to parse and a real finding are the same red, and the job reports the wrong one. The script branches on 0 / 2 / other and says which happened.
+4. **`--redact`.** Never print a finding's value into an Actions log. On a public repo that publishes the secret a second time, to a wider audience than the commit did.
+
+The sha256 is committed rather than read from the release's own `checksums.txt`, which would only prove the download was not corrupted. A caller that bumps `gitleaks_version` MUST bump `gitleaks_sha256` in the same change or the job fails at the checksum step, which is the intended behaviour, not a bug to work around.
+
+## .gitleaks.toml (canonical template)
+
+`.gitleaks.toml` at this repo's root is both this repo's own config and the template every other repo copies. gitleaks' `[extend].path` is a local path only, so there is no way to extend a config over the network: "shared" means "copied from here". Fix a false positive here first, then propagate, rather than letting 27 repos diverge one at a time.
+
+Use the singular `[allowlist]` table. The plural `[[allowlists]]` is silently ignored by gitleaks 8.24.3, and 8.30.1 refuses to load a config containing both forms (`[allowlist] is deprecated, it cannot be used alongside [[allowlists]]`), so a repo that needs a rule-scoped block has to convert the whole file and inherits the 8.24.3 problem when it does.
+
+Allowlist entries are narrow by construction and each carries its reason. The `curl -u "${VAR}:"` entry anchors on the whole captured secret being a shell expansion plus its trailing colon, quotes included; it is not a blanket `curl` exemption. Verified on 8.30.1: a planted `sqp_`-prefixed 40-hex literal in the same `curl -sS -u "<tok>:"` shape is still caught. Re-run that control after any change to the allowlist.
+
+A real credential is never allowlisted. It is rotated, then pinned in the repo's `.gitleaksignore` with its revocation date.
 
 ## Key conventions (MUST follow when editing)
 

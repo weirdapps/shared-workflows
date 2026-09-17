@@ -1,0 +1,159 @@
+name: Reusable Secret Scan
+
+# Reusable full-history gitleaks scan. Fails the caller's build on any finding,
+# honouring the caller repo's own .gitleaks.toml and .gitleaksignore.
+#
+# WHY THIS EXISTS
+# GitHub's native secret scanning needs Advanced Security, which this plan does
+# not include for private repos: it is disabled on every private repo in the org
+# and reports nothing at all there. So the private half of the estate has no
+# server-side net, and a live API key sat undetected in claude-config's history
+# for 105 days before a manual sweep found it. Pre-commit hooks do not close that
+# gap. They never run for a commit pushed by Actions, made on a machine where the
+# hook was never installed, or made with --no-verify.
+#
+# WHY IT RUNS THE BINARY RATHER THAN gitleaks/gitleaks-action
+# That action scopes its scan BY EVENT. On push and pull_request it passes a
+# --log-opts range, so it sees only the commits in that push; full history is
+# scanned only on workflow_dispatch and schedule. A secret committed before the
+# workflow existed is therefore invisible on exactly the events that run most
+# often, which is the whole gap being closed here. Invoking the binary directly
+# makes the scan scope identical on every event. etorotrade hit the other half of
+# the same problem in September 2026: the action's default gitleaks 8.24.3
+# silently ignores top-level [[allowlists]], so its suppressions were dead and
+# the nightly run went red on four known-good findings for nine days.
+#
+# No caller-supplied string is interpolated into a run: block. Both inputs are
+# read through env and used as data, never as shell.
+
+on:
+  workflow_call:
+    inputs:
+      gitleaks_version:
+        description: "gitleaks release to pin, without the leading v."
+        required: false
+        type: string
+        default: "8.30.1"
+      gitleaks_sha256:
+        description: >-
+          sha256 of gitleaks_<version>_linux_x64.tar.gz. Defaults to the digest
+          of the default version. A caller overriding gitleaks_version MUST
+          override this too, or the checksum step fails.
+        required: false
+        type: string
+        default: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+      config_path:
+        description: >-
+          Caller's gitleaks config, relative to the repo root. When the file is
+          absent the scan still runs on the default ruleset and the job warns
+          rather than failing, so a repo is never silently unscanned.
+        required: false
+        type: string
+        default: ".gitleaks.toml"
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: gitleaks (full history)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # fetch-depth: 0 is load-bearing. The default depth-1 checkout hands
+      # gitleaks a single commit, which silently reduces this to a scan of the
+      # push and leaves every pre-existing secret invisible.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: ${{ inputs.gitleaks_version }}
+          GITLEAKS_SHA256: ${{ inputs.gitleaks_sha256 }}
+        run: |
+          set -euo pipefail
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 3 --retry-delay 5 -o "$tarball" "$url"
+          # Pinned digest, NOT the release's own checksums.txt. Verifying a
+          # download against a checksum file fetched from the same release only
+          # proves the bytes arrived intact; it proves nothing if the release
+          # itself is replaced. This digest is committed here, so a swapped
+          # artifact fails the build instead of running.
+          echo "${GITLEAKS_SHA256}  ${tarball}" | sha256sum --check --strict -
+          mkdir -p "$RUNNER_TEMP/gitleaks-bin"
+          tar -xzf "$tarball" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
+          chmod +x "$RUNNER_TEMP/gitleaks-bin/gitleaks"
+          rm -f "$tarball"
+          echo "$RUNNER_TEMP/gitleaks-bin" >>"$GITHUB_PATH"
+
+      - name: Scan full history
+        env:
+          CONFIG_PATH: ${{ inputs.config_path }}
+        run: |
+          set -euo pipefail
+          gitleaks version
+
+          report="$RUNNER_TEMP/gitleaks-report.json"
+          # --exit-code 2 separates "found something" from "the scanner broke".
+          # gitleaks exits 1 on its own errors, so without this a config that
+          # fails to parse is indistinguishable from a clean repo with a leak,
+          # and a red build gets triaged as the wrong thing.
+          args=(git . --redact --no-banner --exit-code 2
+                --report-format json --report-path "$report")
+
+          if [ -f "$CONFIG_PATH" ]; then
+            args+=(--config "$CONFIG_PATH")
+            echo "Config: $CONFIG_PATH"
+          else
+            echo "::warning::$CONFIG_PATH not found. Scanning on the gitleaks default ruleset only. Add one from weirdapps/shared-workflows/.gitleaks.toml."
+          fi
+
+          # .gitleaksignore is read from the repo root via the default
+          # --gitleaks-ignore-path of ".". Report it explicitly: an ignore file
+          # that is present and one that is missing otherwise look identical.
+          if [ -f .gitleaksignore ]; then
+            pinned=$(grep -cvE '^[[:space:]]*(#|$)' .gitleaksignore || true)
+            echo "Ignore file: .gitleaksignore, $pinned pinned exception(s)."
+          else
+            echo "Ignore file: none."
+          fi
+
+          rc=0
+          gitleaks "${args[@]}" || rc=$?
+
+          if [ "$rc" -eq 0 ]; then
+            echo "gitleaks: no findings over full history." >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [ "$rc" -ne 2 ]; then
+            echo "::error::gitleaks exited $rc. That is a scanner failure, not a finding. Check the config parses and the binary downloaded."
+            exit 1
+          fi
+
+          {
+            echo "### gitleaks found secrets in history"
+            echo
+            echo "Values are redacted here and in the log on purpose: printing them"
+            echo "into an Actions log would publish them a second time. Reproduce"
+            echo "locally to see the values."
+            echo
+            echo '```'
+            echo "gitleaks git . --config ${CONFIG_PATH} -v"
+            echo '```'
+            echo
+            echo "| Rule | File | Line | Commit |"
+            echo "|---|---|---|---|"
+            jq -r '.[] | "| \(.RuleID) | `\(.File)` | \(.StartLine) | `\(.Commit[0:8])` |"' "$report"
+            echo
+            echo "A finding that is provably not a credential goes in the repo's"
+            echo "\`.gitleaks.toml\` allowlist, as a NARROW regex, with its reason."
+            echo "A real one is ROTATED first, then pinned in \`.gitleaksignore\`"
+            echo "with its revocation date. Never pin a live credential."
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          echo "::error::gitleaks found secrets over full history. See the job summary."
+          exit 1

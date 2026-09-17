@@ -4,5 +4,13 @@
 # than in a machine-local global ignore file, which no clone or runner ever sees.
 .env
 .env.*
+# Credential-shaped files. Nothing of this shape is tracked in any weirdapps
+# repo today, and these two lines are what keeps it that way: a stray
+# `cp ~/keys/whatever.pem .` is otherwise one `git add -A` away from a commit,
+# and on a private repo nothing server-side would catch it. A global ignore is
+# not a substitute, because no clone and no CI runner ever reads one.
+*.pem
+*.key
+
 
 .DS_Store

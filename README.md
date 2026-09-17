@@ -12,6 +12,11 @@ There is no CI in this repo itself; the workflows are exercised by their callers
 |---|---|
 | [`.github/workflows/deps-refresh.yml`](.github/workflows/deps-refresh.yml) | Node/npm dependency refresh: refresh the lockfile, run a validation command, open a PR with the changes. |
 | [`.github/workflows/dependabot-auto-merge.yml`](.github/workflows/dependabot-auto-merge.yml) | Classify a Dependabot PR, wait for the caller's checks, squash-merge safe updates. Works without branch protection. |
+| [`.github/workflows/gitleaks.yml`](.github/workflows/gitleaks.yml) | Full-history secret scan. Fails the build on any finding. The only server-side net the private repos have. |
+
+This repo also carries the canonical [`.gitleaks.toml`](.gitleaks.toml), which every
+other repo copies. gitleaks cannot extend a config over the network, so "shared"
+means "copied from here"; this repo scanning itself with it keeps it honest.
 
 ## `deps-refresh.yml`
 
@@ -187,6 +192,122 @@ jobs:
 - Caller has no CI at all: only the self-check exists, so the poll sees zero other checks and merges immediately.
 - Merge loses a race to another PR: retried three times, then the workflow comments `@dependabot rebase` and exits cleanly. Dependabot's rebase re-triggers the workflow.
 
+## `gitleaks.yml`
+
+Scans the caller repo's **full history** for secrets and fails the build on any
+finding. Honours the caller's own `.gitleaks.toml` and `.gitleaksignore`.
+
+### Why this exists
+
+GitHub's native secret scanning needs Advanced Security. On this plan that is not
+available for private repos: it is disabled on all 13 of them and reports nothing
+at all. The public repos do get it, and report 0 open alerts. So the private half
+of the estate had no server-side net whatsoever, which is how a live API key sat
+in `claude-config`'s history for 105 days before a manual sweep found it.
+
+Pre-commit hooks do not close that gap. They never run for a commit pushed by
+Actions, for a commit made on a machine where the hook was never installed, or
+for one made with `--no-verify`.
+
+### Why it runs the binary instead of `gitleaks/gitleaks-action`
+
+The action scopes its scan **by event**. On `push` and `pull_request` it passes a
+`--log-opts` range, so it sees only the commits in that push; full history is
+scanned only on `workflow_dispatch` and `schedule`. A secret committed before the
+workflow existed is therefore invisible on exactly the events that run most
+often, which is the whole gap being closed. Invoking the binary directly makes
+the scan scope identical on every event.
+
+`etorotrade` hit the other half of the same problem in September 2026: the
+action's default gitleaks 8.24.3 silently ignores top-level `[[allowlists]]`, so
+its suppressions were dead and the nightly run went red on four known-good
+findings for nine days.
+
+### Inputs
+
+| Input | Required | Default | Description |
+|---|---|---|---|
+| `gitleaks_version` | no | `8.30.1` | gitleaks release to pin, without the leading `v`. |
+| `gitleaks_sha256` | no | digest of the default version | sha256 of `gitleaks_<version>_linux_x64.tar.gz`. A caller overriding `gitleaks_version` MUST override this too, or the checksum step fails. |
+| `config_path` | no | `.gitleaks.toml` | Caller's gitleaks config, relative to the repo root. When absent the scan still runs on the default ruleset and the job warns rather than failing, so a repo is never silently unscanned. |
+
+The digest is committed here rather than fetched from the release's own
+`checksums.txt`. Verifying a download against a checksum file from the same
+release only proves the bytes arrived intact; it proves nothing if the release
+itself is replaced.
+
+### Secrets
+
+None. The scan needs no credentials.
+
+### Required caller permissions
+
+```yaml
+permissions:
+  contents: read
+```
+
+### Caller example
+
+```yaml
+name: Secret Scan
+
+'on':
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1"   # stagger this across repos
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitleaks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gitleaks:
+    uses: weirdapps/shared-workflows/.github/workflows/gitleaks.yml@main
+```
+
+`cancel-in-progress` is safe here and is worth having on a repo that takes
+machine-written commits: every run scans the same full history, so a later run
+strictly supersedes the one it cancels.
+
+### Behaviour
+
+- Checks out with `fetch-depth: 0`. This is load-bearing. The default depth-1
+  checkout hands gitleaks one commit and silently reduces the job to a scan of
+  the push.
+- Downloads the pinned gitleaks release, verifies it against the committed
+  sha256, and puts it on `PATH` from `RUNNER_TEMP`. No `sudo`, no third-party
+  action.
+- Runs `gitleaks git . --redact --exit-code 2`. `--redact` keeps values out of
+  the Actions log, which for a public repo would otherwise publish them twice.
+- `--exit-code 2` separates "found something" from "the scanner broke". gitleaks
+  exits 1 on its own errors, so without it a config that fails to parse is
+  indistinguishable from a real finding, and the red build gets triaged as the
+  wrong thing. Exit 2 fails the job with a findings table; any other non-zero
+  fails it with a scanner-error annotation.
+- Findings are written to the job summary as `rule | file | line | commit`, with
+  the reproduction command. Values stay redacted.
+- No config at `config_path`: the job warns and scans on the default ruleset. It
+  does not fail, because a repo with no config is still worth scanning.
+
+### Triage contract
+
+A finding that is provably not a credential goes in the repo's `.gitleaks.toml`
+allowlist, as a **narrow** regex, with its reason written down. A real one is
+**rotated first**, then pinned in `.gitleaksignore` with its revocation date.
+Never pin a live credential: the pin makes it invisible without making it safe.
+
+Use the singular `[allowlist]` table, not `[[allowlists]]`. gitleaks 8.24.3 parses
+`[[rules]]` but silently ignores the plural form, and the two cannot be mixed
+either: 8.30.1 refuses to load a config containing both, with `[allowlist] is
+deprecated, it cannot be used alongside [[allowlists]]`.
+
 ## `deps-refresh.yml` flow
 
 ```mermaid
@@ -228,7 +349,9 @@ When making a breaking change here, switch pinned callers to a SHA on the previo
 ├── .github/
 │   └── workflows/
 │       ├── dependabot-auto-merge.yml
-│       └── deps-refresh.yml
+│       ├── deps-refresh.yml
+│       └── gitleaks.yml
+├── .gitleaks.toml        # canonical template, copied into every other repo
 ├── CLAUDE.md
 ├── LICENSE
 └── README.md
