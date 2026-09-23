@@ -141,7 +141,11 @@ jobs:
           MERGE_METHOD: ${{ inputs.merge_method }}
           GH_REPO: ${{ github.repository }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
           MAX_API_FAILURES: "5"
+          SETTLE_SECONDS: "120"
+          EMPTY_POLLS_REQUIRED: "3"
         run: |
           set -euo pipefail
 
@@ -192,6 +196,26 @@ jobs:
             echo "No required status checks on $BASE_REF, so --auto would merge on the spot. Polling instead."
           fi
 
+          # A check list read too early looks exactly like a PR with no CI.
+          # Sibling workflows and apps register their checks asynchronously,
+          # and `gh pr checks` lags even the check runs that already exist. One
+          # caller's PR (2026-09-18) was read 15s after its head commit as "no
+          # non-self checks at all" and merged, although four check runs had
+          # started 5-8s before that read and an app check followed 24s after.
+          # So neither an empty list nor an all-green one is final until
+          # SETTLE_SECONDS have passed since the head commit, and an empty one
+          # must also read empty EMPTY_POLLS_REQUIRED times in a row, which
+          # still holds when the head commit is old (a reopen or a re-run).
+          # An unreadable or future commit date anchors on now instead.
+          now=$(date +%s)
+          head_epoch=$now
+          if committed=$(gh api "repos/$GH_REPO/commits/$HEAD_SHA" --jq .commit.committer.date 2>/dev/null) \
+             && ts=$(date -d "$committed" +%s 2>/dev/null) && [ "$ts" -lt "$now" ]; then
+            head_epoch=$ts
+          fi
+          settle_at=$(( SECONDS + head_epoch + SETTLE_SECONDS - now ))
+          empty_polls=0
+
           # Exclude this workflow's own checks or we would wait on ourselves.
           deadline=$(( SECONDS + TIMEOUT_MINUTES * 60 ))
           api_failures=0
@@ -233,9 +257,35 @@ jobs:
               exit 1
             fi
 
+            if [ "$total" -eq 0 ]; then
+              empty_polls=$(( empty_polls + 1 ))
+            else
+              empty_polls=0
+            fi
+
             if [ "$pending" -eq 0 ]; then
+              if [ "$SECONDS" -lt "$settle_at" ] \
+                 || { [ "$total" -eq 0 ] && [ "$empty_polls" -lt "$EMPTY_POLLS_REQUIRED" ]; }; then
+                echo "  $total non-self check(s), none pending. Settling, in case more are still registering."
+                sleep 20
+                continue
+              fi
               if [ "$total" -eq 0 ]; then
-                echo "::warning::This PR has no non-self checks at all. Merging on the update classifier alone, with no independent verification."
+                # Settled and still nothing but this workflow. Only a patch or
+                # minor may merge on the classifier alone; anything else it
+                # allowed, such as a grouped major, waits for a human.
+                case "$UPDATE_TYPE" in
+                  version-update:semver-patch|version-update:semver-minor|version-update:semver-patchminor)
+                    echo "::warning::This PR has no non-self checks at all, even after settling. Merging on the update classifier alone, with no independent verification."
+                    ;;
+                  *)
+                    note="Not auto-merged: no check other than this workflow registered on this PR within the settle window, and a '${UPDATE_TYPE:-unclassified}' update merges on the classifier alone only when it is a patch or minor. Review and merge it by hand."
+                    echo "::warning::$note"
+                    echo "$note" >>"$GITHUB_STEP_SUMMARY"
+                    gh_retry gh pr comment "$PR_URL" --body "$note" >/dev/null || true
+                    exit 0
+                    ;;
+                esac
               fi
               echo "All $total non-self check(s) green."
               break

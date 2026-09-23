@@ -194,7 +194,8 @@ jobs:
 - Grouped update: the grouped inputs are the sole decider and overwrite the update-type verdict, so `allow_minor` is ignored here. Under the defaults the group merges even when its aggregate level is major; set `allow_major_in_group: false` to hold those.
 - Any non-self check fails: the failing `workflow / job` names are printed and the job exits non-zero. Nothing is merged.
 - Checks still pending past `checks_timeout_minutes`: the job fails rather than merging blind.
-- Caller has no CI at all: only the self-check exists, so the poll sees zero other checks and merges immediately.
+- Checks register asynchronously, and `gh pr checks` lags even the check runs that already exist, so the first read after a push can be empty on a PR with full CI. Neither an empty list nor an all-green one is final until 120 s have passed since the PR's head commit, and an empty list must also read empty on 3 consecutive polls, 20 s apart, which covers an old head commit on a reopen or a re-run.
+- Caller has no CI at all: after settling, only the self-check exists. A patch or minor update merges on the classifier alone, with a warning. Anything else the classifier allowed, such as a grouped major, stays open with a PR comment asking for manual review.
 - Merge loses a race to another PR: retried three times, then the workflow comments `@dependabot rebase` and exits cleanly. Dependabot's rebase re-triggers the workflow.
 
 ## `gitleaks.yml`

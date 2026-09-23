@@ -31,11 +31,12 @@ Callers are NOT uniform. Before changing a default, check what each caller relie
 
 `etorotrade` is the one caller that sets `exclude_branch_prefixes`, to `dependabot/pip/`. Its source of truth is `poetry.lock`, but pip-Dependabot rewrites only the derived `requirements-*-lock.txt`, so auto-merging a pip PR desyncs the two. Do not drop that input when editing its caller.
 
-Three invariants that are easy to break and expensive to debug:
+Four invariants that are easy to break and expensive to debug:
 
 1. **Do not switch this back to a bare `gh pr merge --auto`.** Native auto-merge needs `allow_auto_merge` AND a branch-protection rule. On this plan, private repos cannot have branch protection (`403 Upgrade to GitHub Pro`) and `PATCH allow_auto_merge=true` silently no-ops on them, returning `200` with the value still `false`. `--auto` is attempted first as a fast path, but the polling fallback is what actually merges on most repos here.
 2. **The check poll must keep excluding `.workflow != github.workflow`.** This job is itself a check on the PR it is merging. Waiting on "all checks" waits on itself and hangs until the job timeout.
 3. **The grouped block is the sole decider for grouped PRs and can both grant and revoke.** It runs after the `case` on update type and overwrites that verdict, so `allow_minor: false` does NOT yield patch-only behaviour on a grouped PR. Verified by running the classify script: update-type `semver-minor` with a non-empty group and `allow_minor: false` still classifies `merge=true`.
+4. **Nothing pending is not the same as done.** Checks register asynchronously and `gh pr checks` lags even the check runs that exist, so the first read after a push can be empty on a PR with full CI: one caller merged that way 15 s after its head commit, with four check runs already started. Neither empty nor all-green is final until `SETTLE_SECONDS` since the head commit, and empty also needs `EMPTY_POLLS_REQUIRED` consecutive empty reads. Settled and still empty merges only a patch or minor; anything else gets a PR comment and stays open. Dropping the settle brings back merges on a check list read before CI existed.
 
 Majors are handled two different ways, and that is deliberate. An ungrouped major is never auto-merged. A grouped update whose aggregate level is major IS auto-merged under the defaults, because `allow_major_in_group` defaults to true; only the three repos listed above opt out. Do not "fix" the classify block to hold every major: that silently changes behaviour for every caller on the defaults.
 
